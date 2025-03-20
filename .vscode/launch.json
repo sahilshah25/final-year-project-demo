@@ -1,0 +1,14 @@
+{
+    "configurations": [
+        {
+            "type": "java",
+            "name": "Spring Boot-WebRtcApplication<WebRtc>",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "mainClass": "com.WebRtc.WebRtc.WebRtcApplication",
+            "projectName": "WebRtc",
+            "args": "",
+            "envFile": "${workspaceFolder}/.env"
+        }
+    ]
+}

@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <title>WebRTC Video Streaming</title>
+    <script src="https://cdn.jsdelivr.net/npm/sockjs-client/dist/sockjs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/stompjs/lib/stomp.min.js"></script>
+</head>
+<body>
+    <h1>WebRTC Video Streaming</h1>
+    <!-- Video elements for local and remote streams -->
+    <video id="localVideo" autoplay muted></video>
+    <video id="remoteVideo" autoplay></video>
+    <!-- Button to start/stop recording -->
+    <button id="recordButton">Start Recording</button>
+
+    <script>
+        // Get references to HTML elements
+        const localVideo = document.getElementById('localVideo');
+        const remoteVideo = document.getElementById('remoteVideo');
+        const recordButton = document.getElementById('recordButton');
+
+        // Variables for WebRTC and WebSocket
+        let localStream;
+        let peerConnection;
+
+        // Variables for recording
+        let mediaRecorder;
+        let recordedChunks = [];
+        let isRecording = false;
+
+        // WebSocket configuration
+        const signalingEndpoint = 'http://localhost:8080/ws';
+        const socket = new SockJS(signalingEndpoint);
+        const stompClient = Stomp.over(socket);
+
+        // Connect to WebSocket
+        stompClient.connect({}, function (frame) {
+            console.log('Connected to WebSocket');
+            stompClient.subscribe('/topic/signal', function (message) {
+                console.log('Received message:', message.body);
+                handleSignal(JSON.parse(message.body));
+            });
+        });
+
+        // WebRTC configuration
+        const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+
+        // Start the camera and microphone
+        async function start() {
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                console.log('Local stream:', localStream);
+                localVideo.srcObject = localStream;
+
+                // Initialize WebRTC peer connection
+                peerConnection = new RTCPeerConnection(configuration);
+
+                // Add local tracks to the peer connection
+                localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+                let remoteDescriptionSet = false;
+                let pendingCandidates = [];
+
+                // Handle remote stream
+                peerConnection.ontrack = event => {
+                    console.log('Received remote stream:', event.streams[0]);
+                    remoteVideo.srcObject = event.streams[0];
+                };
+
+                // Handle ICE candidates
+                peerConnection.onicecandidate = event => {
+                    if (event.candidate) {
+                        console.log('ICE candidate:', event.candidate);
+                        stompClient.send("/app/signal", {}, JSON.stringify({
+                            type: 'candidate',
+                            candidate: {
+                                candidate: event.candidate.candidate,
+                                sdpMid: event.candidate.sdpMid,
+                                sdpMLineIndex: event.candidate.sdpMLineIndex,
+                                usernameFragment: event.candidate.usernameFragment
+                            }
+                        }));
+                    }
+                };
+
+
+                //
+                // When receiving remote SDP
+async function handleRemoteSDP(remoteSdp) {
+    await peerConnection.setRemoteDescription(new RTCSessionDescription(remoteSdp));
+    remoteDescriptionSet = true;
+
+    // Add pending ICE candidates
+    while (pendingCandidates.length > 0) {
+        peerConnection.addIceCandidate(new RTCIceCandidate(pendingCandidates.shift()));
+    }
+}
+
+// When receiving ICE candidates
+async function handleRemoteCandidate(candidate) {
+    if (remoteDescriptionSet) {
+        await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+    } else {
+        pendingCandidates.push(candidate);
+    }
+}
+
+                // Initiate the offer
+                createOffer();
+            } catch (error) {
+                console.error('Error accessing media devices:', error);
+            }
+        }
+
+        // Create an offer for WebRTC connection
+        async function createOffer() {
+            const offer = await peerConnection.createOffer();
+            console.log('Created offer:', offer);
+            await peerConnection.setLocalDescription(offer);
+            stompClient.send("/app/signal", {}, JSON.stringify({ type: 'offer', sdp: offer }));
+        }
+
+        // Handle incoming signaling messages
+        function handleSignal(signal) {
+            console.log('Received signal:', signal);
+            if (signal.type === 'offer') {
+                handleOffer(signal);
+            } else if (signal.type === 'answer') {
+                handleAnswer(signal);
+            } else if (signal.type === 'candidate') {
+                handleCandidate(signal);
+            }
+        }
+
+        // Handle incoming offer
+        async function handleOffer(offer) {
+            try {
+                console.log('Received offer:', offer);
+
+                // Ensure the offer is a valid RTCSessionDescription object
+                const sessionDescription = new RTCSessionDescription({
+                    type: 'offer',
+                    sdp: offer.sdp // Ensure the SDP is correctly formatted
+                });
+
+                await peerConnection.setRemoteDescription(sessionDescription);
+                console.log('Remote description set:', sessionDescription);
+
+                const answer = await peerConnection.createAnswer();
+                console.log('Created answer:', answer);
+                await peerConnection.setLocalDescription(answer);
+                stompClient.send("/app/signal", {}, JSON.stringify({ type: 'answer', sdp: answer }));
+            } catch (error) {
+                console.error('Error handling offer:', error);
+            }
+        }
+
+        // Handle incoming answer
+        async function handleAnswer(answer) {
+            try {
+                console.log('Received answer:', answer);
+
+                // Ensure the answer is a valid RTCSessionDescription object
+                const sessionDescription = new RTCSessionDescription({
+                    type: 'answer',
+                    sdp: answer.sdp // Ensure the SDP is correctly formatted
+                });
+
+                await peerConnection.setRemoteDescription(sessionDescription);
+                console.log('Remote description set:', sessionDescription);
+            } catch (error) {
+                console.error('Error handling answer:', error);
+            }
+        }
+
+        // Handle incoming ICE candidate
+        async function handleCandidate(signal) {
+            try {
+                const candidateData = signal.candidate;
+
+                // Ensure the remote description is set before adding ICE candidates
+                if (!peerConnection.remoteDescription) {
+                    console.warn('Remote description is not set. Delaying ICE candidate addition.');
+                    return;
+                }
+
+                const candidate = new RTCIceCandidate({
+                    candidate: candidateData.candidate,
+                    sdpMid: candidateData.sdpMid || null,
+                    sdpMLineIndex: candidateData.sdpMLineIndex || null,
+                    usernameFragment: candidateData.usernameFragment || null
+                });
+
+                await peerConnection.addIceCandidate(candidate);
+                console.log('Added ICE candidate:', candidate);
+            } catch (error) {
+                console.error('Error adding ICE candidate:', error);
+            }
+        }
+
+        // Start recording
+        function startRecording() {
+            recordedChunks = []; // Clear previous recordings
+
+            // Check for supported MIME types
+            const supportedMimeTypes = [
+                'audio/webm',
+                'audio/mp4',
+                'audio/ogg',
+                'audio/wav'
+            ].filter(mimeType => MediaRecorder.isTypeSupported(mimeType));
+
+            if (supportedMimeTypes.length === 0) {
+                console.error('No supported MIME types found for MediaRecorder');
+                alert('Your browser does not support audio recording.');
+                return;
+            }
+
+            // Use the first supported MIME type
+            const mimeType = supportedMimeTypes[0];
+
+            // Create a MediaRecorder instance
+            mediaRecorder = new MediaRecorder(localStream, {
+                mimeType: mimeType
+            });
+
+            // Collect data chunks when recording
+            mediaRecorder.ondataavailable = event => {
+                if (event.data.size > 0) {
+                    recordedChunks.push(event.data);
+                }
+            };
+
+            // Save the recording when stopped
+            mediaRecorder.onstop = () => {
+                const blob = new Blob(recordedChunks, { type: mimeType });
+                const url = URL.createObjectURL(blob);
+
+                // Create a download link for the recorded audio
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `recording.${mimeType.split('/')[1]}`; // e.g., recording.webm
+                a.textContent = 'Download Recording';
+                document.body.appendChild(a);
+            };
+
+            // Start recording
+            mediaRecorder.start();
+            console.log('Recording started with MIME type:', mimeType);
+        }
+
+        // Stop recording
+        function stopRecording() {
+            mediaRecorder.stop();
+            console.log('Recording stopped');
+        }
+
+        // Toggle recording on button click
+        recordButton.addEventListener('click', () => {
+            if (!isRecording) {
+                startRecording();
+                recordButton.textContent = 'Stop Recording';
+            } else {
+                stopRecording();
+                recordButton.textContent = 'Start Recording';
+            }
+            isRecording = !isRecording;
+        });
+
+        // Initialize the application
+        start();
+    </script>
+</body>
+</html>
